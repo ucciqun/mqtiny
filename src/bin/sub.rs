@@ -73,7 +73,7 @@ impl Decoder for MQTinyPublishDecoder {
         topic_name_bytes.copy_from_slice(&src[2..4]);
         let topic_name = u16::from_be_bytes(topic_name_bytes);
 
-        let data = src[2 + 2..2 + remaining_length].to_vec();
+        let data = src[(2 + 2)..(2 + remaining_length)].to_vec();
         src.advance(2 + remaining_length);
 
         match String::from_utf8(data) {
@@ -109,16 +109,15 @@ async fn main() {
 
     let mut request = Vec::new();
     let packet_type = PacketType::Subscribe;
-
     let topic_length = 2;
     let total_length = topic_length;
 
-    request.push((packet_type as u8) << 4);
+    request.push(((packet_type as u8) << 4) as u8);
     request.push(total_length as u8);
     request.push((args.topic >> 8) as u8);
     request.push((args.topic & 0xff) as u8);
-    request.push(0 as u8); // padding
-    request.push(0 as u8); // padding
+    // request.push(0 as u8); // padding
+    // request.push(0 as u8); // padding
 
     stream.write_all(&request).await.unwrap();
     request.clear();

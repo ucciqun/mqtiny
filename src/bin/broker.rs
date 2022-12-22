@@ -1,8 +1,17 @@
-use bytes::Buf;
+use std::{collections::HashMap, sync::Arc};
+
+use bytes::{Buf, BufMut};
 use clap::Parser;
-use tokio::net::TcpListener;
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+};
 use tokio_stream::StreamExt;
-use tokio_util::codec::{Decoder, FramedRead};
+use tokio_util::codec::{Decoder, Encoder, Framed, FramedRead};
+
+const MAX_TOPIC: usize = 100;
+const NEW_CONNECTION: u64 = 100;
 
 #[allow(unused)]
 #[derive(Debug)]
@@ -43,6 +52,7 @@ struct Packet {
     fixed_header: FixedHeader,
     variable_header: VariableHeader,
     payload: String,
+    src: Vec<u8>,
 }
 
 #[allow(unused)]
@@ -56,8 +66,8 @@ struct FixedHeader {
 struct VariableHeader {
     topic_name: u16,
 }
-struct MQTinyDecoder {}
-impl Decoder for MQTinyDecoder {
+struct MQTinyCodec {}
+impl Decoder for MQTinyCodec {
     type Item = Packet;
     type Error = std::io::Error;
 
@@ -84,8 +94,7 @@ impl Decoder for MQTinyDecoder {
         let mut topic_name_bytes = [0u8; 2];
         topic_name_bytes.copy_from_slice(&src[2..4]);
         let topic_name = u16::from_be_bytes(topic_name_bytes);
-
-        src.advance(2 + remaining_length);
+        let payload = src[(2 + 2)..(2 + remaining_length)].to_vec();
 
         // switch packet_type
         let packet_type: PacketType = match packet_type {
@@ -117,19 +126,59 @@ impl Decoder for MQTinyDecoder {
                         remaining_length: remaining_length.try_into().unwrap(),
                     },
                     variable_header: VariableHeader { topic_name },
-                    payload: "test".to_string(),
+                    payload: String::from_utf8(payload).unwrap(),
+                    src: (src[..]).to_vec(),
                 };
+                src.advance(2 + remaining_length);
                 Ok(Some(p))
             }
-            _ => {
-                println!("hge");
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "oh"))
+            PacketType::Subscribe => {
+                println!("subscribe is coming!");
+                let p = Packet {
+                    fixed_header: FixedHeader {
+                        packet_type,
+                        qos,
+                        remaining_length: remaining_length.try_into().unwrap(),
+                    },
+                    variable_header: VariableHeader { topic_name },
+                    payload: "".to_string(),
+                    src: (src[..]).to_vec(),
+                };
+                src.advance(2 + remaining_length);
+                Ok(Some(p))
             }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "undefined packet type",
+            )),
         }
     }
 }
 
-#[tokio::main]
+impl Encoder<Packet> for MQTinyCodec {
+    type Error = std::io::Error;
+    fn encode(&mut self, item: Packet, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        let fixed_header_len = 2;
+        dst.reserve(fixed_header_len + item.fixed_header.remaining_length as usize);
+        dst.put_u8(
+            ((item.fixed_header.packet_type as u8) << 4) + ((item.fixed_header.qos as u8) << 1),
+        );
+        dst.put_u8(item.fixed_header.remaining_length.into());
+
+        match item.fixed_header.packet_type {
+            PacketType::Publish | PacketType::Subscribe => {
+                dst.put_u16(item.variable_header.topic_name);
+                dst.extend_from_slice(item.payload.as_bytes());
+            }
+            PacketType::Puback => {}
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
 
@@ -138,21 +187,97 @@ async fn main() {
         .unwrap();
     println!("Listening on 127.0.0.1:{}", args.port);
 
+    let table = Arc::new(Mutex::new(HashMap::new()));
+
     loop {
         let (client, _) = listener.accept().await.unwrap();
 
-        println!("nankakita");
+        let table = table.clone();
 
-        let codec = MQTinyDecoder {};
-        let mut frame_reader = FramedRead::new(client, codec);
+        tokio::spawn(async move {
+            process(client, table).await;
+        });
+    }
+}
 
-        while let Some(frame) = frame_reader.next().await {
-            match frame {
-                Ok(data) => {
-                    println!("{:?}", data.payload);
+async fn process(client: TcpStream, table: Arc<Mutex<HashMap<u16, TcpStream>>>) {
+    let codec = MQTinyCodec {};
+    let mut framed = Framed::new(client, codec);
+
+    while let Some(frame) = .next().await {
+        match frame {
+            Ok(data) => match data.fixed_header.packet_type {
+                PacketType::Publish => {
+                    let mut table = table.lock().await;
+
+                    match table.get_mut(&data.variable_header.topic_name) {
+                        Some(stream) => {
+                            stream.write_all(&data.src).await.unwrap();
+                        }
+                        _ => {}
+                    }
+
+                    match data.fixed_header.qos {
+                        QoS::AtLeastOnce | QoS::ExactlyOnce => {
+                            let mut response = Vec::new();
+                            response.push((PacketType::Puback as u8) << 4 + (1 << 1));
+                            response.push(1 as u8);
+                            client.write_all(&response).await.unwrap();
+                            // client.write_all(&request).await.unwrap();
+                        }
+                        QoS::AtMostOnce => {}
+                    }
                 }
-                Err(err) => eprintln!("error: {:?}", err),
-            }
+                _ => {}
+            },
+            Err(err) => eprintln!("error: {:?}", err),
         }
     }
 }
+
+// fn main(){
+//     let args=Args::parse();
+//     let listener=TcpListener::bind(&format!("127.0.0.1:{}",args.port)).unwrap();
+//     listener.set_nonblocking(true).unwrap();
+//     let epoll_fd=epoll_create().unwrap();
+
+//     let event=EpollEvent::new(EpollFlags::EPOLLIN|EpollFlags::EPOLLRDHUP,NEW_CONNECTION);
+//     let fd=listener.as_raw_fd();
+//     epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, fd, &mut event);
+
+//     let mut events=vec![EpollEvent::empty();1024];
+
+//     let mut clients=HashMap::new();
+//     let mut clientId=NEW_CONNECTION+1;
+
+//     loop {
+//         let event_cnt=match epoll_wait(epoll_fd, &mut events, -1) {
+//             Ok(v)=>v,
+//             Err(err)=>panic!("epoll_wait() error"),
+//         };
+
+//         for event in &events[0..event_cnt] {
+//             match event.data() {
+//                 NEW_CONNECTION=>{
+//                     match listener.accept(){
+//                         Ok((stream,_))=>{
+//                             let event=EpollEvent::new(EpollFlags::EPOLLIN|EpollFlags::EPOLLRDHUP, clientId);
+//                             epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, stream.as_raw_fd(), &mut event);
+//                             clients.insert(clientId, stream);
+//                             clientId+=1;
+//                         }
+//                         Err(err)=>eprintln!("accept err: {:?}",err),
+//                     }
+//                 }
+//                 _=>{
+//                     // this event is readable
+//                     if event.events().contains(EpollFlags::EPOLLIN){
+//                         let stream=clients.get(&event.data()).unwrap();
+//                         let decoder=MQTinyDecoder{};
+//                         FramedRead::new(stream, decoder);
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
