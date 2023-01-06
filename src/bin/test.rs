@@ -1,141 +1,157 @@
-use std::{thread, time::Duration};
+use clap::Parser;
+use futures::SinkExt;
+use mqtiny::*;
+use std::{collections::HashMap, error::Error, net::SocketAddr, sync::Arc};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, Mutex},
+};
+use tokio_stream::StreamExt;
+use tokio_util::codec::Framed;
 
-fn main() {
-    // let v = vec![1, 2, 3];
-
-    // let handle = thread::spawn(move || {
-    //     println!("Here's a vector: {:?}", v);
-    // });
-    // handle.join().unwrap();
-
-    // for i in 1..5 {
-    //     println!("hi number {} from the main thread!", i);
-    //     thread::sleep(Duration::from_millis(1));
-    // }
-
-    let payload = "A".repeat(10);
-    let mut request = [0; 1024];
-    request[4..].copy_from_slice(&payload.as_bytes());
-    println!("{:?}", payload.as_bytes());
-    println!("{:?}", request);
+#[derive(Parser, Debug)]
+struct Args {
+    /// MQTiny service port
+    #[arg(short, long, default_value_t = 1883)]
+    port: u16,
 }
 
-// use clap::Parser;
-// use std::io;
-// use std::io::prelude::*;
-// use std::net::TcpStream;
-// use std::time::{Duration, Instant};
-// use tokio::stream;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.port)).await?;
+    println!("Listening port: {}...", args.port);
 
-// #[allow(unused)]
-// #[derive(Debug)]
-// enum PacketType {
-//     Unknown = 0,
-//     Connect = 1,
-//     Connack = 2,
-//     Publish = 3,
-//     Puback = 4,
-//     Pubrec = 5,
-//     Pubrel = 6,
-//     Pubcomp = 7,
-//     Subscribe = 8,
-//     Suback = 9,
-//     Unsubscribe = 10,
-//     Unsuback = 11,
-//     Pingreq = 12,
-//     Pingresp = 13,
-//     Disconnect = 14,
-//     Reserved = 15,
-// }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let clients = Arc::new(Mutex::new(HashMap::<SocketAddr, Tx>::new()));
 
-// #[derive(Parser, Debug)]
-// #[command(name = "MQTiny", author = "Ryo OUCHI")]
-// struct Args {
-//     /// Address of the MQTiny server to connect
-//     #[arg(short, long)]
-//     ip: String,
+    {
+        let clients = clients.clone();
+        tokio::spawn(async move {
+            manage(&mut rx, clients).await;
+        });
+    }
 
-//     /// MQTiny service port
-//     #[arg(short, long, default_value_t = 1883)]
-//     port: u16,
+    loop {
+        let tx = tx.clone();
+        let (stream, _) = listener.accept().await?;
+        let clients = Arc::clone(&clients);
 
-//     /// Total number of clients
-//     #[arg(short, long, default_value_t = 200)]
-//     count: u16,
+        tokio::spawn(async move {
+            process(stream, tx, clients).await.unwrap();
+        });
+    }
+}
 
-//     /// Interval to publish a message
-//     #[arg(short = 'I', long, default_value_t = 1000)]
-//     interval_of_msg: u64,
+async fn manage(rx: &mut Rx, clients: Arc<Mutex<HashMap<SocketAddr, Tx>>>) {
+    let mut subscription_table = HashMap::<u16, Vec<SocketAddr>>::new();
+    while let Some(cmd) = rx.recv().await {
+        // match cmd {
+        //     MqttPacket::Publish(_) => todo!(),
+        //     MqttPacket::Subscribe(subscribe) => subscription_table
+        //         .get(&subscribe.topic_name)
+        //         .unwrap()
+        //         .push(value),
+        // }
+        match cmd {
+            Command::Publish { packet } => {
+                if let Some(subscriptions) = subscription_table.get(&packet.topic_name) {
+                    let mut clients = clients.lock().await;
+                    for subscriber in subscriptions {
+                        if let Some(subscriber) = clients.get_mut(subscriber) {
+                            subscriber
+                                .send(Command::Publish {
+                                    packet: packet.clone(),
+                                })
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            Command::Subscribe { packet, client } => {
+                match subscription_table.get_mut(&packet.topic_name) {
+                    Some(subscriptions) => subscriptions.push(client),
+                    None => {
+                        subscription_table.insert(packet.topic_name, vec![client]);
+                    }
+                    // Some(subscriptions) => subscriptions.push(client),
+                    // None => subscription_table.insert(packet.topic_name, vec![client]),
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
-//     /// Published topics
-//     #[arg(short, long)]
-//     topic: u16,
+async fn process(
+    stream: TcpStream,
+    tx_to_manager: Tx,
+    clients: Arc<Mutex<HashMap<SocketAddr, Tx>>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut framed = Framed::new(stream, MQTinyCodec {});
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    {
+        clients
+            .lock()
+            .await
+            .insert(framed.get_ref().peer_addr()?, tx);
+    }
 
-//     /// Message Payload size (bytes)
-//     #[arg(short, long, default_value_t = 10)]
-//     size: u8,
+    loop {
+        tokio::select! {
+            Some(msg) = rx.recv() => {
+                match msg{
+                    Command::Publish { packet } => {
+                        framed.send(mqtiny::MqttPacket::Publish(packet)).await.unwrap();
+                    },
+                    _ => {},
+                }
+            }
+            result = framed.next() => match result {
+                Some(Ok(packet)) => match packet {
+                    MqttPacket::Publish(publish) => {
+                        tx_to_manager
+                            .send(Command::Publish { packet: publish })
+                            .unwrap();
+                    }
+                    MqttPacket::Subscribe(subscribe) => {
+                        // println!("{:?}", subscribe.topic_name);
+                        tx_to_manager
+                            .send(Command::Subscribe {
+                                packet: subscribe,
+                                client: framed.get_ref().peer_addr()?,
+                            })
+                            .unwrap();
+                    }
+                    _=>{},
+                },
+                Some(Err(e)) => eprintln!("{}", e),
+                None => break,
+        }
+        }
+    }
 
-//     /// Number of messages to publish
-//     #[arg(short, long, default_value_t = 5000)]
-//     messages: u32,
-// }
+    {
+        let mut clients = clients.lock().await;
+        clients.remove(&framed.get_ref().peer_addr()?);
+        println!("this client is disconnected.");
+    }
+    Ok(())
+}
 
-// pub fn main() -> io::Result<()> {
-//     let args = Args::parse();
-//     let mut connections = Vec::new();
+#[derive(Debug, Clone)]
+enum Command {
+    Subscribe {
+        packet: MqttSubscribePacket,
+        client: SocketAddr,
+    },
+    Publish {
+        packet: MqttPublishPacket,
+    },
+    Puback {
+        packet: MqttPubackPacket,
+    },
+}
 
-//     //
-//     // Connect
-//     for _ in 0..args.count {
-//         let stream = TcpStream::connect(&format!("{}:{}", args.ip, args.port))?;
-//         connections.push(stream);
-//     }
-
-//     //
-//     // Create Publish packet
-//     //
-//     let mut request = Vec::new();
-//     let packet_type = PacketType::Publish;
-//     let topic_length = 2;
-//     let total_length = args.size + topic_length;
-//     let payload = "A".repeat(args.size.into());
-//     request.push(packet_type as u8);
-//     request.push(total_length as u8);
-//     request.push((args.topic >> 8) as u8);
-//     request.push((args.topic & 0xff) as u8);
-//     request.extend_from_slice(payload.as_bytes());
-
-//     let mut count = 0;
-//     let start = Instant::now();
-
-//     for _ in 0..args.messages {
-//         //
-//         // Send Publish packet
-//         //
-//         stream.write_all(&request).unwrap();
-
-//         //
-//         // Receive Puback packet
-//         //
-//         let mut response = [0; 1024];
-//         let _n = stream.read(&mut response)?;
-
-//         let response_packet_type = response[0];
-//         if response_packet_type == PacketType::Puback as u8 {
-//             // println!("PUBACK received");
-//         }
-
-//         count += 1;
-
-//         std::thread::sleep(Duration::from_millis(args.interval_of_msg));
-//     }
-//     stream.shutdown(std::net::Shutdown::Both)?;
-
-//     let elapsed = start.elapsed();
-
-//     print!("{:?},", elapsed.as_micros());
-//     println!();
-//     println!("published messages: {}", count);
-
-//     Ok(())
-// }
+type Tx = mpsc::UnboundedSender<Command>;
+type Rx = mpsc::UnboundedReceiver<Command>;
