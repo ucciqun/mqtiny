@@ -62,10 +62,9 @@ async fn main() {
                         topic_name: _,
                         qos: _,
                         payload: _,
-                    }) => {
-                        // println!("{:?}", payload);
-                    }
+                    }) => {}
                     MqttPacket::Subscribe(_) => todo!(),
+                    MqttPacket::Puback(_) => todo!(),
                 }
                 count += 1;
                 if count % 1000 == 0 {

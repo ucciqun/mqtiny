@@ -78,7 +78,6 @@ async fn manage(rx: &mut Rx, clients: Arc<Mutex<HashMap<SocketAddr, Tx>>>) {
                     // None => subscription_table.insert(packet.topic_name, vec![client]),
                 }
             }
-            _ => {}
         }
     }
 }
@@ -147,9 +146,6 @@ enum Command {
     },
     Publish {
         packet: MqttPublishPacket,
-    },
-    Puback {
-        packet: MqttPubackPacket,
     },
 }
 

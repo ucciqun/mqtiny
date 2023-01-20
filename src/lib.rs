@@ -101,6 +101,7 @@ impl Encoder<MqttPacket> for MQTinyCodec {
                 Ok(())
             }
             MqttPacket::Subscribe(_) => todo!(),
+            MqttPacket::Puback(_) => todo!(),
         }
     }
 }
