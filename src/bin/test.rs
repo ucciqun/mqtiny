@@ -19,7 +19,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.port)).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
     println!("Listening port: {}...", args.port);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
