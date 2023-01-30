@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     let mut connections = Vec::new();
+    let mut handles = Vec::new();
 
     for _ in 0..args.count {
         let stream = TcpStream::connect(&format!("{}:{}", args.ip, args.port))
@@ -76,9 +77,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         connections.push(stream);
     }
 
+    println!("start publishing");
+
     loop {
         if let Some(mut stream) = connections.pop() {
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 let start = Instant::now();
 
                 let mut request = Vec::new();
@@ -118,11 +121,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 let elapsed = start.elapsed();
                 print!("{:?}", elapsed);
-            });
+            }));
         } else {
             break;
         }
     }
+
+    futures::future::join_all(handles).await;
 
     Ok(())
 }
