@@ -98,7 +98,11 @@ pub fn main() -> io::Result<()> {
 
                 let mut count = 0;
 
-                for _ in 0..args.messages {
+                stream.write_all(&request).unwrap();
+                thread::sleep(Duration::from_millis(1000));
+                count += 1;
+
+                for _ in 0..args.messages - 1 {
                     //
                     // Send Publish packet
                     //
