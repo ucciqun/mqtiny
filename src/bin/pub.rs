@@ -1,8 +1,10 @@
 use clap::Parser;
-use std::io::prelude::*;
-use std::net::TcpStream;
-use std::time::{Duration, Instant};
-use std::{io, thread};
+use std::{error::Error, thread};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpStream,
+    time::{Duration, Instant},
+};
 
 #[allow(unused)]
 #[derive(Debug)]
@@ -61,27 +63,24 @@ struct Args {
     qos: u8,
 }
 
-pub fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
+
     let mut connections = Vec::new();
 
-    //
-    // Connect server
-    //
     for _ in 0..args.count {
-        let stream = TcpStream::connect(&format!("{}:{}", args.ip, args.port))?;
+        let stream = TcpStream::connect(&format!("{}:{}", args.ip, args.port))
+            .await
+            .unwrap();
         connections.push(stream);
     }
 
-    let mut handles = Vec::new();
-    let start = Instant::now();
-
-    for _ in 0..args.count {
+    loop {
         if let Some(mut stream) = connections.pop() {
-            let handle = thread::spawn(move || {
-                //
-                // Create Publish packet
-                //
+            tokio::spawn(async move {
+                let start = Instant::now();
+
                 let mut request = Vec::new();
                 let packet_type = PacketType::Publish; // [7:4] in fixed header
                 let topic_length = 2;
@@ -98,7 +97,7 @@ pub fn main() -> io::Result<()> {
 
                 let mut count = 0;
 
-                stream.write_all(&request).unwrap();
+                stream.write_all(&request).await.unwrap();
                 thread::sleep(Duration::from_millis(1000));
                 count += 1;
 
@@ -106,20 +105,7 @@ pub fn main() -> io::Result<()> {
                     //
                     // Send Publish packet
                     //
-                    stream.write_all(&request).unwrap();
-
-                    //
-                    // Receive Puback packet if qos > 0
-                    //
-                    if args.qos > 0 {
-                        let mut response = [0; 1024];
-                        let _n = stream.read(&mut response).unwrap();
-
-                        let response_packet_type = response[0];
-                        if response_packet_type == PacketType::Puback as u8 {
-                            // println!("PUBACK received");
-                        }
-                    }
+                    stream.write_all(&request).await.unwrap();
 
                     if args.interval_of_msg != 0 {
                         thread::sleep(Duration::from_millis(args.interval_of_msg));
@@ -129,28 +115,14 @@ pub fn main() -> io::Result<()> {
                 }
 
                 println!("published {} messages", count);
+
+                let elapsed = start.elapsed();
+                print!("{:?}", elapsed);
             });
-            handles.push(handle);
+        } else {
+            break;
         }
     }
-
-    for _ in 0..args.count {
-        if let Some(handle) = handles.pop() {
-            handle.join().unwrap();
-        }
-    }
-
-    //
-    // Close server connection
-    //
-    for i in 0..args.count {
-        if let Some(stream) = connections.get(i) {
-            stream.shutdown(std::net::Shutdown::Both)?;
-        }
-    }
-
-    let elapsed = start.elapsed();
-    print!("{:?}", elapsed);
 
     Ok(())
 }
