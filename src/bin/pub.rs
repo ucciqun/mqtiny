@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("published {} messages", count);
 
                 let elapsed = start.elapsed();
-                print!("{:?}", elapsed);
+                println!("{:?}", elapsed);
             }));
         } else {
             break;
