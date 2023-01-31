@@ -21,6 +21,10 @@ struct Args {
     /// Subscrived topics
     #[arg(short, long)]
     topic: u16,
+
+    /// is FPGA?
+    #[arg(short, long, default_value_t = false)]
+    fpga: bool,
 }
 #[tokio::main]
 async fn main() {
@@ -43,8 +47,14 @@ async fn main() {
     request.push(((packet_type as u8) << 4) as u8);
     request.push(total_length as u8);
     request.put_u16(args.topic);
-    // request.push(0 as u8); // padding
-    // request.push(0 as u8); // padding
+    if args.fpga {
+        request.push(0 as u8); // padding
+        request.push(0 as u8); // padding
+        request.push(0 as u8); // padding
+        request.push(0 as u8); // padding
+        request.push(0 as u8); // padding
+        request.push(0 as u8); // padding
+    }
 
     stream.write_all(&request).await.unwrap();
     request.clear();
