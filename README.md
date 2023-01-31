@@ -1,5 +1,7 @@
 # mqtiny
 This project provides MQTiny softwares.
+## Requirements
+please install rust environments on your computer.
 ## Usage
 ### Broker
 ```
