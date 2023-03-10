@@ -52,3 +52,21 @@ example
 ```
 cargo run --bin sub -- -i 192.168.0.202 -p 7001 -t 1 --fpga
 ```
+
+### Echo
+
+```
+Usage: echo [OPTIONS] --ip <IP>
+
+Options:
+  -i, --ip <IP>                            Address of the MQTiny server to connect
+  -p, --port <PORT>                        MQTiny service port [default: 1883]
+  -I, --interval-of-msg <INTERVAL_OF_MSG>  Interval to publish a message [default: 1000]
+  -m, --messages <MESSAGES>                Number of messages to publish [default: 5000]
+  -h, --help                               Print help information
+```
+
+example
+```
+cargo run --bin echo -- -i 192.168.0.202 -p 7001 -I 1000 -m 5000
+```
